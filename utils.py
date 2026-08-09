@@ -24,7 +24,7 @@ def split_date_column(df: pd.DataFrame) -> pd.DataFrame:
     df["Month"] = df["Date"].dt.month
     df["Day"] = df["Date"].dt.day
     df["WeekOfYear"] = df.Date.dt.isocalendar().week
-    return df
+    return df 
 
 
 
