@@ -5,11 +5,11 @@ import seaborn as sns
 import itertools
 import tensorflow as tf
 import joblib
+import tensorflow_probability as tfp
 from pathlib import Path 
 from sklearn.metrics import confusion_matrix
 
-
-
+# ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 def split_date_column(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -26,9 +26,7 @@ def split_date_column(df: pd.DataFrame) -> pd.DataFrame:
     df["WeekOfYear"] = df.Date.dt.isocalendar().week
     return df 
 
-
-
-
+# ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 def plot_loss_curves(history):
     """
@@ -69,9 +67,7 @@ def plot_loss_curves(history):
 
     plt.tight_layout()
 
-
-
-    
+# ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 def plot_confusion_matrix(y_test, y_pred, model):
     """
@@ -158,9 +154,157 @@ def plot_confusion_matrix(y_test, y_pred, model):
 
     plt.show()
 
+# ///////////////////////////////////////////////////////////////////////////////////////////////////
+
 def save_model(model, path): 
     """Save a fitted model to disk.""" 
     path = Path(path) 
     path.parent.mkdir(parents=True, exist_ok=True) 
     joblib.dump(model, path) 
     print(f"Model saved to: {path}")
+
+# ///////////////////////////////////////////////////////////////////////////////////////////////////
+
+def box(lam, im_size):
+    """
+    Generate a random bounding box for CutMix.
+
+    The bounding-box area is approximately determined by `lam`:
+        box_area / image_area ~= 1 - lam
+
+    Args:
+        lam: Scalar lambda sampled from a Beta distribution.
+        im_size: Height and width of the square image.
+
+    Returns:
+        y1: Top coordinate of the bounding box.
+        x1: Left coordinate of the bounding box.
+        box_h: Height of the bounding box.
+        box_w: Width of the bounding box.
+    """
+    # Calculate the side length of the CutMix region.
+    cut_ratio = tf.sqrt(1.0 - lam)
+
+    box_w = tf.cast(im_size * cut_ratio, tf.int32)
+    box_h = tf.cast(im_size * cut_ratio, tf.int32)
+
+    # Randomly select the center of the bounding box.
+    cx = tf.random.uniform(
+        shape=(),
+        minval=0,
+        maxval=im_size,
+        dtype=tf.int32,
+    )
+
+    cy = tf.random.uniform(
+        shape=(),
+        minval=0,
+        maxval=im_size,
+        dtype=tf.int32,
+    )
+
+    # Calculate bounding-box coordinates.
+    x1 = cx - box_w // 2
+    y1 = cy - box_h // 2
+
+    x2 = cx + box_w // 2
+    y2 = cy + box_h // 2
+
+    # Clip the box so that it stays inside the image.
+    x1 = tf.clip_by_value(x1, 0, im_size)
+    y1 = tf.clip_by_value(y1, 0, im_size)
+
+    x2 = tf.clip_by_value(x2, 0, im_size)
+    y2 = tf.clip_by_value(y2, 0, im_size)
+
+    # Recalculate dimensions after clipping.
+    box_w = tf.maximum(x2 - x1, 1)
+    box_h = tf.maximum(y2 - y1, 1)
+
+    return y1, x1, box_h, box_w
+
+# ///////////////////////////////////////////////////////////////////////////////////////////////////
+
+def cutmix(
+    train_dataset_1,
+    train_dataset_2,
+    im_size,
+    alpha=0.2,
+):
+    """
+    Apply CutMix augmentation to two image-label pairs.
+
+    CutMix replaces a randomly selected rectangular region of image 1
+    with the corresponding region from image 2. The labels are mixed
+    according to the proportion of each image present in the final image.
+
+    Args:
+        train_dataset_1: Tuple of (image_1, label_1).
+        train_dataset_2: Tuple of (image_2, label_2).
+        im_size: Height and width of the square input images.
+        alpha: Beta distribution parameter used to sample CutMix lambda.
+
+    Returns:
+        image: CutMix-augmented image.
+        label: Mixed label.
+    """
+    (image_1, label_1), (image_2, label_2) = (
+        train_dataset_1,
+        train_dataset_2,
+    )
+
+    # Sample lambda from a Beta distribution.
+    lam = tfp.distributions.Beta(alpha, alpha).sample()
+
+    # Get the CutMix bounding box.
+    r_y, r_x, r_h, r_w = box(lam, im_size)
+
+    # Extract the corresponding region from image 2.
+    crop_2 = tf.image.crop_to_bounding_box(
+        image_2,
+        r_y,
+        r_x,
+        r_h,
+        r_w,
+    )
+
+    # Place image 2's crop at the same location in a blank image.
+    pad_2 = tf.image.pad_to_bounding_box(
+        crop_2,
+        r_y,
+        r_x,
+        im_size,
+        im_size,
+    )
+
+    # Extract the same region from image 1.
+    crop_1 = tf.image.crop_to_bounding_box(
+        image_1,
+        r_y,
+        r_x,
+        r_h,
+        r_w,
+    )
+
+    # Place image 1's crop at the same location.
+    pad_1 = tf.image.pad_to_bounding_box(
+        crop_1,
+        r_y,
+        r_x,
+        im_size,
+        im_size,
+    )
+
+    # Replace image 1's region with image 2's region.
+    image = image_1 - pad_1 + pad_2
+
+    # Recalculate lambda using the actual bounding-box area.
+    box_area = tf.cast(r_h * r_w, tf.float32)
+    total_area = tf.cast(im_size * im_size, tf.float32)
+
+    lam = 1.0 - (box_area / total_area)
+
+    # Mix the labels according to the area of each image.
+    label = lam * label_1 + (1.0 - lam) * label_2
+
+    return image, label
