@@ -307,4 +307,4 @@ def cutmix(
     # Mix the labels according to the area of each image.
     label = lam * label_1 + (1.0 - lam) * label_2
 
-    return image, label
+    return image, label 
